@@ -1,0 +1,147 @@
+import React, { useState, useEffect } from 'react';
+import { ethers } from 'ethers';
+import axios from 'axios';
+import './App.css'; // For basic styling
+
+function App() {
+  const [connectedAccount, setConnectedAccount] = useState('');
+  const [agreements, setAgreements] = useState([]);
+  const [contractInfo, setContractInfo] = useState(null);
+  const [newAgreementBeneficiary, setNewAgreementBeneficiary] = useState('');
+  const [newAgreementDays, setNewAgreementDays] = useState('30');
+
+  // Initialize on page load
+  useEffect(() => {
+    fetchContractInfo();
+  }, []);
+
+  const fetchContractInfo = async () => {
+    const response = await axios.get('http://localhost:3001/api/contract-info');
+    setContractInfo(response.data);
+  };
+
+  // Connect the user's MetaMask wallet
+  const connectWallet = async () => {
+    if (window.ethereum) {
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        setConnectedAccount(accounts[0]);
+        fetchUserAgreements(accounts[0]);
+      } catch (error) {
+        console.error("Could not connect wallet:", error);
+      }
+    } else {
+      alert('Please install MetaMask!');
+    }
+  };
+
+  // Fetch agreements for the connected user
+  const fetchUserAgreements = async (address) => {
+    const response = await axios.get(`http://localhost:3001/api/agreements/${address}`);
+    setAgreements(response.data.agreements);
+  };
+
+  // Create a new escrow agreement (client-side transaction)
+  const createNewAgreement = async () => {
+    if (!window.ethereum || !contractInfo) return;
+    
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    // You would need the contract ABI here as well
+    const contract = new ethers.Contract(contractInfo.address, CONTRACT_ABI_FROM_BACKEND, signer);
+    
+    // This is a mock fee (0.01 ETH). In reality, you'd calculate based on service.
+    const fee = ethers.parseEther('0.01');
+    
+    try {
+      const tx = await contract.createAgreement(newAgreementBeneficiary, newAgreementDays, { value: fee });
+      await tx.wait();
+      alert('Escrow agreement created successfully!');
+      fetchUserAgreements(connectedAccount); // Refresh list
+    } catch (error) {
+      console.error('Error creating agreement:', error);
+      alert('Failed to create agreement.');
+    }
+  };
+
+  return (
+    <div className="App">
+      <header>
+        <h1>Secure Crypto Recovery Service</h1>
+        {!connectedAccount ? (
+          <button onClick={connectWallet}>Connect MetaMask</button>
+        ) : (
+          <p>Connected: <strong>{connectedAccount}</strong></p>
+        )}
+      </header>
+
+      <main>
+        <section>
+          <h2>Create New Escrow Agreement</h2>
+          <div>
+            <input 
+              type="text" 
+              placeholder="Service Provider's Wallet Address (Beneficiary)" 
+              value={newAgreementBeneficiary}
+              onChange={(e) => setNewAgreementBeneficiary(e.target.value)}
+            />
+            <input 
+              type="number" 
+              placeholder="Service Duration (Days)" 
+              value={newAgreementDays}
+              onChange={(e) => setNewAgreementDays(e.target.value)}
+            />
+            <button onClick={createNewAgreement}>Create & Fund Escrow</button>
+            <p><small>You will confirm the transaction (and pay the fee) in MetaMask.</small></p>
+          </div>
+        </section>
+
+        <section>
+          <h2>Your Active Agreements</h2>
+          {agreements.length === 0 ? (
+            <p>No active agreements found for your account.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Counterparty</th>
+                  <th>Amount (ETH)</th>
+                  <th>Status</th>
+                  <th>Deadline</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agreements.map(agreement => (
+                  <tr key={agreement.id}>
+                    <td>{agreement.id}</td>
+                    <td>{agreement.depositor === connectedAccount ? 'You are Client' : 'You are Service'}</td>
+                    <td>{ethers.formatEther(agreement.amount)}</td>
+                    <td>{agreement.isFulfilled ? '✅ Completed' : '⏳ Pending'}</td>
+                    <td>{new Date(agreement.expiresAt * 1000).toLocaleDateString()}</td>
+                    <td>
+                      {!agreement.isFulfilled && agreement.depositor === connectedAccount && Date.now()/1000 > agreement.expiresAt && (
+                        <button>Claim Refund</button>
+                      )}
+                      {!agreement.isFulfilled && agreement.beneficiary === connectedAccount && (
+                        <button onClick={() => alert('This would open the report delivery form.')}>Deliver Report</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </main>
+
+      <footer>
+        <p>Smart Contract Address: <code>{contractInfo ? contractInfo.address : 'Loading...'}</code> ({contractInfo ? contractInfo.network : ''})</p>
+        <p><strong>Disclaimer:</strong> This is a prototype. Use on testnet only.</p>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
