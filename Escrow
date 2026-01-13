@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract RecoveryEscrow is ReentrancyGuard, Ownable {
+    // Struct to hold all data for a single escrow agreement
+    struct EscrowAgreement {
+        address depositor;       // The client
+        address beneficiary;     // Your service company
+        uint256 amount;          // Service fee in wei
+        uint256 expiresAt;       // Deadline timestamp
+        bool isFulfilled;        // True if service completed & paid
+        bool isDisputed;         // True if a dispute is raised
+        string reportHash;       // IPFS hash of the final recovery report (proof of work)
+    }
+
+    // State variables
+    EscrowAgreement[] public agreements;
+    mapping(uint256 => bool) public isActive;
+
+    // Events for transparency and frontend updates
+    event AgreementCreated(uint256 indexed agreementId, address depositor, address beneficiary, uint256 amount, uint256 expiresAt);
+    event ServiceFulfilled(uint256 indexed agreementId, string reportHash, uint256 amountReleased);
+    event RefundIssued(uint256 indexed agreementId, uint256 amountRefunded);
+    event DisputeRaised(uint256 indexed agreementId, address raisedBy);
+
+    // Constructor can set an initial owner (your company's admin wallet)
+    constructor() Ownable(msg.sender) {}
+
+    // ========== CORE FUNCTIONS ==========
+
+    // Clients call this to create and fund a new escrow agreement
+    function createAgreement(address _beneficiary, uint256 _serviceDurationDays) external payable nonReentrant {
+        require(msg.value > 0, "Fee must be greater than 0");
+        require(_beneficiary != address(0), "Invalid beneficiary address");
+
+        uint256 expiresAt = block.timestamp + (_serviceDurationDays * 1 days);
+
+        agreements.push(EscrowAgreement({
+            depositor: msg.sender,
+            beneficiary: _beneficiary,
+            amount: msg.value,
+            expiresAt: expiresAt,
+            isFulfilled: false,
+            isDisputed: false,
+            reportHash: ""
+        }));
+
+        uint256 newAgreementId = agreements.length - 1;
+        isActive[newAgreementId] = true;
+
+        emit AgreementCreated(newAgreementId, msg.sender, _beneficiary, msg.value, expiresAt);
+    }
+
+    // Your service calls this to deliver the final report and claim the fee
+    function fulfillService(uint256 _agreementId, string calldata _reportHash) external nonReentrant {
+        EscrowAgreement storage agreement = agreements[_agreementId];
+
+        require(isActive[_agreementId], "Agreement does not exist");
+        require(msg.sender == agreement.beneficiary, "Only beneficiary can fulfill");
+        require(!agreement.isFulfilled, "Service already fulfilled");
+        require(block.timestamp < agreement.expiresAt, "Agreement has expired");
+        require(!agreement.isDisputed, "Agreement is under dispute");
+
+        agreement.isFulfilled = true;
+        agreement.reportHash = _reportHash;
+
+        // Transfer the fee to your service
+        (bool success, ) = payable(agreement.beneficiary).call{value: agreement.amount}("");
+        require(success, "Transfer to beneficiary failed");
+
+        emit ServiceFulfilled(_agreementId, _reportHash, agreement.amount);
+    }
+
+    // Client can call for a refund after the deadline if service is not done
+    function claimRefund(uint256 _agreementId) external nonReentrant {
+        EscrowAgreement storage agreement = agreements[_agreementId];
+
+        require(isActive[_agreementId], "Agreement does not exist");
+        require(msg.sender == agreement.depositor, "Only depositor can refund");
+        require(!agreement.isFulfilled, "Service was fulfilled");
+        require(block.timestamp >= agreement.expiresAt, "Deadline not yet passed");
+        require(!agreement.isDisputed, "Agreement is under dispute");
+
+        isActive[_agreementId] = false; // Deactivate
+
+        (bool success, ) = payable(agreement.depositor).call{value: agreement.amount}("");
+        require(success, "Refund to depositor failed");
+
+        emit RefundIssued(_agreementId, agreement.amount);
+    }
+
+    // Optional: Dispute function (can be extended with arbitration)
+    function raiseDispute(uint256 _agreementId) external {
+        EscrowAgreement storage agreement = agreements[_agreementId];
+        require(isActive[_agreementId], "Agreement does not exist");
+        require(msg.sender == agreement.depositor || msg.sender == agreement.beneficiary, "Not a party to this agreement");
+        require(!agreement.isDisputed, "Dispute already raised");
+
+        agreement.isDisputed = true;
+        emit DisputeRaised(_agreementId, msg.sender);
+    }
+
+    // ========== VIEW FUNCTIONS ==========
+    function getAgreement(uint256 _agreementId) external view returns (
+        address depositor,
+        address beneficiary,
+        uint256 amount,
+        uint256 expiresAt,
+        bool isFulfilled,
+        bool isDisputed,
+        string memory reportHash
+    ) {
+        EscrowAgreement storage agreement = agreements[_agreementId];
+        return (
+            agreement.depositor,
+            agreement.beneficiary,
+            agreement.amount,
+            agreement.expiresAt,
+            agreement.isFulfilled,
+            agreement.isDisputed,
+            agreement.reportHash
+        );
+    }
+
+    function getAgreementCount() external view returns (uint256) {
+        return agreements.length;
+    }
+}
